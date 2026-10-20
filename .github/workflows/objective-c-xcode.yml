@@ -1,30 +1,94 @@
-name: Xcode - Build and Analyze
+name: Xcode - Build and Release
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
+    tags: ["YIT"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    name: Build and analyse default scheme using xcodebuild command
-    runs-on: macos-latest
+  build-and-release:
+    name: Build SwiftUI app for iOS and macOS
+    runs-on: macos-15
+
+    env:
+      PROJECT: "Yet Another IP.xcodeproj"
+      SCHEME: "Yet Another IP"
+      CONFIGURATION: "Release"
+      IOS_SIMULATOR_NAME: "iPhone 16 Pro"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set Default Scheme
+
+      - name: Show Xcode version
         run: |
-          scheme_list=$(xcodebuild -list -json | tr -d "\n")
-          default=$(echo $scheme_list | ruby -e "require 'json'; puts JSON.parse(STDIN.gets)['project']['targets'][0]")
-          echo $default | cat >default
-          echo Using default scheme: $default
-      - name: Build
-        env:
-          scheme: ${{ 'default' }}
+          xcodebuild -version
+
+      - name: Build iOS Simulator
         run: |
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild clean build analyze -scheme "$scheme" -"$filetype_parameter" "$file_to_build" | xcpretty && exit ${PIPESTATUS[0]}
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination "platform=iOS Simulator,name=$IOS_SIMULATOR_NAME" \
+            -derivedDataPath .build/derivedData-ios \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Build macOS
+        run: |
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination "platform=macOS" \
+            -derivedDataPath .build/derivedData-macos \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package macOS archive
+        if: startsWith(github.ref, 'refs/tags/YIT')
+        run: |
+          mkdir -p artifacts
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination "platform=macOS" \
+            -archivePath "artifacts/Yet-Another-IP-macos.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "artifacts/Yet-Another-IP-macos.xcarchive" \
+            "artifacts/Yet-Another-IP-macos.zip"
+
+      - name: Package iOS simulator app
+        if: startsWith(github.ref, 'refs/tags/YIT')
+        run: |
+          mkdir -p artifacts
+          APP_PATH=$(find .build/derivedData-ios -path "*/Build/Products/Release-iphonesimulator/*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "iOS app not found in derived data"
+            exit 1
+          fi
+
+          cp -R "$APP_PATH" "artifacts/Yet Another IP.app"
+          cd artifacts
+          zip -r "Yet-Another-IP-ios-simulator.zip" "Yet Another IP.app"
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/YIT')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/Yet-Another-IP-macos.zip
+            artifacts/Yet-Another-IP-ios-simulator.zip
